@@ -121,6 +121,6 @@ GET /api/employee?companyId=<companyid>
 From the project root (where `go.mod` exists):
 
 ```bash
-go test ./internal/jobs
+go test -v ./internal/jobs -race
 ```
 
