@@ -18,6 +18,7 @@ func main() {
 	apiMgr := &jobs.APIJobManager{
 		Jobs:    make(map[string]*jobs.APIJob),
 		BaseMgr: baseMgr,
+		TTL:     5 * time.Minute, // cache API jobs for 5mins
 	}
 
 	mux := requests.NewRouter(apiMgr)
