@@ -18,7 +18,7 @@ func handleAPIRequest(
 		return
 	}
 
-	job := apiMgr.GetOrCreate(companyID, apiType)
+	job := apiMgr.GetOrCreate(r.Context(), companyID, apiType)
 
 	select {
 	case <-job.Done:

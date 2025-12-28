@@ -1,8 +1,12 @@
 package jobs
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 type BaseJob struct {
+	mu          sync.Mutex
 	CompanyID   string
 	Result      string
 	Err         error

@@ -9,92 +9,130 @@ import (
 	"time"
 )
 
+//
+// --------------------
+// Base Job
+// --------------------
+//
+
 type BaseJobManager struct {
 	mu   sync.Mutex
-	Jobs map[string]*BaseJob
-	TTL  time.Duration
+	jobs map[string]*BaseJob
+	ttl  time.Duration
 }
 
-func (m *BaseJobManager) GetOrCreate(companyID string) *BaseJob {
+func NewBaseJobManager(ttl time.Duration) *BaseJobManager {
+	return &BaseJobManager{
+		jobs: make(map[string]*BaseJob),
+		ttl:  ttl,
+	}
+}
+
+func (m *BaseJobManager) GetOrCreate(ctx context.Context, companyID string) *BaseJob {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if job, ok := m.Jobs[companyID]; ok {
-		if !job.CompletedAt.IsZero() &&
-			time.Since(job.CompletedAt) > m.TTL {
+	if job, ok := m.jobs[companyID]; ok {
+		job.mu.Lock()
+		completed := !job.CompletedAt.IsZero()
+		expired := completed && time.Since(job.CompletedAt) > m.ttl
+		job.mu.Unlock()
 
-			log.Printf("[BaseJob] TTL expired, evicting company=%s", companyID)
-			delete(m.Jobs, companyID)
-
-		} else {
+		if !expired {
 			log.Printf("[BaseJob] cache hit company=%s", companyID)
 			return job
 		}
+
+		log.Printf("[BaseJob] TTL expired, evicting company=%s", companyID)
+		delete(m.jobs, companyID)
 	}
 
 	log.Printf("[BaseJob] creating new job company=%s", companyID)
 
 	job := &BaseJob{
 		CompanyID: companyID,
-		Done:      make(chan struct{}),
 		CreatedAt: time.Now(),
+		Done:      make(chan struct{}),
 	}
-	m.Jobs[companyID] = job
 
-	go m.runBaseJob(job)
+	m.jobs[companyID] = job
+	go m.run(job, ctx)
 
 	return job
 }
 
-func (m *BaseJobManager) runBaseJob(job *BaseJob) {
+func (m *BaseJobManager) run(job *BaseJob, parentCtx context.Context) {
 	log.Printf("[BaseJob] started company=%s", job.CompanyID)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer func() {
+		job.mu.Lock()
+		job.CompletedAt = time.Now()
+		job.mu.Unlock()
+		close(job.Done)
+	}()
+
+	ctx, cancel := context.WithTimeout(parentCtx, 20*time.Second)
 	defer cancel()
 
 	select {
-	case <-time.After(20 * time.Second):
+	case <-time.After(10 * time.Second):
+		job.mu.Lock()
 		job.Result = "base-data-for-" + job.CompanyID
+		job.mu.Unlock()
 		log.Printf("[BaseJob] completed company=%s", job.CompanyID)
 
 	case <-ctx.Done():
+		job.mu.Lock()
 		job.Err = ctx.Err()
-		log.Printf("[BaseJob] timeout company=%s err=%v", job.CompanyID, job.Err)
+		job.mu.Unlock()
+		log.Printf("[BaseJob] failed company=%s err=%v", job.CompanyID, ctx.Err())
 	}
-
-	job.CompletedAt = time.Now()
-	close(job.Done)
 }
+
+//
+// --------------------
+// API Job
+// --------------------
+//
 
 type APIJobManager struct {
 	mu      sync.Mutex
-	Jobs    map[string]*APIJob
-	BaseMgr *BaseJobManager
-	TTL     time.Duration
+	jobs    map[string]*APIJob
+	ttl     time.Duration
+	baseMgr *BaseJobManager
 }
 
-// utility function to create the key
+func NewAPIJobManager(baseMgr *BaseJobManager, ttl time.Duration) *APIJobManager {
+	return &APIJobManager{
+		jobs:    make(map[string]*APIJob),
+		ttl:     ttl,
+		baseMgr: baseMgr,
+	}
+}
+
 func apiJobKey(companyID string, api model.APIType) string {
 	return companyID + ":" + string(api)
 }
 
-func (m *APIJobManager) GetOrCreate(companyID string, api model.APIType) *APIJob {
+func (m *APIJobManager) GetOrCreate(ctx context.Context, companyID string, api model.APIType) *APIJob {
 	key := apiJobKey(companyID, api)
 
 	m.mu.Lock()
-	if job, ok := m.Jobs[key]; ok {
+	defer m.mu.Unlock()
 
-		// Lazy TTL eviction
-		if !job.CompletedAt.IsZero() &&
-			time.Since(job.CompletedAt) > m.TTL {
+	if job, ok := m.jobs[key]; ok {
+		job.mu.Lock()
+		completed := !job.CompletedAt.IsZero()
+		expired := completed && time.Since(job.CompletedAt) > m.ttl
+		job.mu.Unlock()
 
-			log.Printf("[APIJob] TTL expired, evicting api=%s company=%s", api, companyID)
-			delete(m.Jobs, key)
-
-		} else {
+		if !expired {
 			log.Printf("[APIJob] cache hit api=%s company=%s", api, companyID)
 			return job
 		}
+
+		log.Printf("[APIJob] TTL expired, evicting api=%s company=%s", api, companyID)
+		delete(m.jobs, key)
 	}
 
 	log.Printf("[APIJob] creating api=%s company=%s", api, companyID)
@@ -104,56 +142,58 @@ func (m *APIJobManager) GetOrCreate(companyID string, api model.APIType) *APIJob
 		APIType:   api,
 		Done:      make(chan struct{}),
 	}
-	m.Jobs[key] = job
-	m.mu.Unlock()
 
-	go m.runAPIJob(job)
+	m.jobs[key] = job
+	go m.run(job, ctx)
 
 	return job
 }
 
-func (m *APIJobManager) runAPIJob(job *APIJob) {
+func (m *APIJobManager) run(job *APIJob, parentCtx context.Context) {
 	log.Printf("[APIJob] started api=%s company=%s", job.APIType, job.CompanyID)
 
 	defer func() {
-		m.mu.Lock()
-		delete(m.Jobs, apiJobKey(job.CompanyID, job.APIType))
-		m.mu.Unlock()
-
-		log.Printf("[APIJob] cleaned up api=%s company=%s", job.APIType, job.CompanyID)
+		job.mu.Lock()
+		job.CompletedAt = time.Now()
+		job.mu.Unlock()
+		close(job.Done)
 	}()
 
-	baseJob := m.BaseMgr.GetOrCreate(job.CompanyID)
+	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+	defer cancel()
 
-	log.Printf("[APIJob] waiting for base job api=%s company=%s",
-		job.APIType, job.CompanyID)
+	baseJob := m.baseMgr.GetOrCreate(ctx, job.CompanyID)
 
 	select {
 	case <-baseJob.Done:
-		if baseJob.Err != nil {
-			job.Err = baseJob.Err
+		baseJob.mu.Lock()
+		err := baseJob.Err
+		result := baseJob.Result
+		baseJob.mu.Unlock()
+
+		if err != nil {
+			job.mu.Lock()
+			job.Err = err
+			job.mu.Unlock()
 			log.Printf("[APIJob] base job failed api=%s company=%s err=%v",
-				job.APIType, job.CompanyID, job.Err)
-			close(job.Done)
+				job.APIType, job.CompanyID, err)
 			return
 		}
 
-	case <-time.After(30 * time.Second):
-		job.Err = errors.New("timeout waiting for base job")
-		log.Printf("[APIJob] timeout waiting base job api=%s company=%s",
+		time.Sleep(10 * time.Second)
+
+		job.mu.Lock()
+		job.Result = string(job.APIType) + "-result-using-" + result
+		job.mu.Unlock()
+
+		log.Printf("[APIJob] completed api=%s company=%s",
 			job.APIType, job.CompanyID)
-		close(job.Done)
-		return
+
+	case <-ctx.Done():
+		job.mu.Lock()
+		job.Err = errors.New("timeout waiting for base job")
+		job.mu.Unlock()
+		log.Printf("[APIJob] timeout api=%s company=%s",
+			job.APIType, job.CompanyID)
 	}
-
-	log.Printf("[APIJob] base job ready api=%s company=%s",
-		job.APIType, job.CompanyID)
-
-	time.Sleep(20 * time.Second)
-	job.Result = string(job.APIType) + "-result-using-" + baseJob.Result
-
-	log.Printf("[APIJob] completed api=%s company=%s",
-		job.APIType, job.CompanyID)
-
-	close(job.Done)
 }

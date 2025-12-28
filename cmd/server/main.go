@@ -10,16 +10,9 @@ import (
 
 func main() {
 
-	baseMgr := &jobs.BaseJobManager{
-		Jobs: make(map[string]*jobs.BaseJob),
-		TTL:  5 * time.Minute, // cache base jobs for 5mins
-	}
+	baseMgr := jobs.NewBaseJobManager(5 * time.Minute)
 
-	apiMgr := &jobs.APIJobManager{
-		Jobs:    make(map[string]*jobs.APIJob),
-		BaseMgr: baseMgr,
-		TTL:     5 * time.Minute, // cache API jobs for 5mins
-	}
+	apiMgr := jobs.NewAPIJobManager(baseMgr, 5*time.Minute)
 
 	mux := requests.NewRouter(apiMgr)
 
