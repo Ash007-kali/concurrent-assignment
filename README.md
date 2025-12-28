@@ -107,13 +107,14 @@ git clone <repository-url>
 cd <repository-root>
 
 go run ./cmd/server
-
+```
 
 The server listens on a port (e.g., :8080) and exposes endpoints:
-
+```bash
 GET /api/financials?companyId=<companyid>
 GET /api/sales?companyId=<companyid>
 GET /api/employee?companyId=<companyid>
+```
 
 ## How to Run Tests
 
